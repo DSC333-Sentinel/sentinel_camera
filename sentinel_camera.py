@@ -24,6 +24,7 @@ import cv2
 from flask import Flask, Response
 import platform
 import os
+import subprocess
 
 app = Flask(__name__)
 
@@ -34,13 +35,25 @@ def init_camera():
     is_rpi  = (system == "Linux" and ("arm" in machine.lower() or "aarch64" in machine.lower()))
 
     if is_rpi:
-        result = os.system("rpicam-still --list-cameras > /dev/null 2>&1")
-        if result != 0:
-            raise IOError("No camera detected. Check your connection and try again.")
-        print("[camera] Raspberry Pi detected — using rpicam-still")
-        return ("rpicam", None)
+        import subprocess
+        proc = subprocess.Popen(
+            [
+                "rpicam-vid",
+                "-t",          "0",         # run indefinitely
+                "--codec",     "mjpeg",      # output MJPEG not h264
+                "--width",     "640",
+                "--height",    "480",
+                "--framerate", "15",         # bump to 30 if your Pi can handle it
+                "--nopreview",
+                "-o",          "-",          # pipe to stdout
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+        print("[camera] Raspberry Pi detected — using rpicam-vid (MJPEG pipe)")
+        return ("rpicam-vid", proc)
 
-    # macOS / local machine fallback
+    # macOS / local fallback
     print("[camera] Using OpenCV webcam capture")
     cam = cv2.VideoCapture(0)
     if not cam.isOpened():
@@ -57,29 +70,42 @@ CAMERA_TYPE, CAMERA = init_camera()
 
 # FRAME GENERATOR
 def generate_frames():
-    tmp_path = "/tmp/stream_frame.jpg"
-    while True:
-        if CAMERA_TYPE == "rpicam":
-            ret = os.system(f"rpicam-still -o {tmp_path} --nopreview -t 500 > /dev/null 2>&1")
-            if ret != 0 or not os.path.exists(tmp_path):
-                print("[camera] rpicam-still failed to capture frame — retrying...")
-                continue
-            frame_bgr = cv2.imread(tmp_path)
-            if frame_bgr is None:
-                continue
-        else:
+    if CAMERA_TYPE == "rpicam-vid":
+        # Read the raw MJPEG byte stream from rpicam-vid stdout.
+        # JPEG frames are delimited by SOI (0xFF 0xD8) and EOI (0xFF 0xD9) markers.
+        buf = b""
+        while True:
+            chunk = CAMERA.stdout.read(4096)
+            if not chunk:
+                break
+            buf += chunk
+
+            start = buf.find(b"\xff\xd8")  # JPEG SOI marker
+            end   = buf.find(b"\xff\xd9")  # JPEG EOI marker
+
+            if start != -1 and end != -1 and end > start:
+                jpg = buf[start:end + 2]
+                buf = buf[end + 2:]         # keep remainder for next frame
+
+                yield (
+                    b"--frame\r\n"
+                    b"Content-Type: image/jpeg\r\n\r\n" +
+                    jpg +
+                    b"\r\n"
+                )
+    else:
+        while True:
             success, frame_bgr = CAMERA.read()
             if not success:
                 print("[camera] Failed to read frame — retrying...")
                 continue
-
-        _, buffer = cv2.imencode(".jpg", frame_bgr, [cv2.IMWRITE_JPEG_QUALITY, 85])
-        yield (
-            b"--frame\r\n"
-            b"Content-Type: image/jpeg\r\n\r\n" +
-            buffer.tobytes() +
-            b"\r\n"
-        )
+            _, buffer = cv2.imencode(".jpg", frame_bgr, [cv2.IMWRITE_JPEG_QUALITY, 85])
+            yield (
+                b"--frame\r\n"
+                b"Content-Type: image/jpeg\r\n\r\n" +
+                buffer.tobytes() +
+                b"\r\n"
+            )
 
 # ROUTES
 @app.route("/stream")

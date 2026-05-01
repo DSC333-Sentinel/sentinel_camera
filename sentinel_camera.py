@@ -29,34 +29,24 @@ app = Flask(__name__)
 
 # CAMERA SETUP
 def init_camera():
-    """
-    Detects the platform and returns the appropriate camera object.
-    - On macOS: OpenCV with the default webcam (index 0)
-    - On RPI:   picamera2 if available, otherwise OpenCV fallback
-    """
-    system = platform.system()
+    system  = platform.system()
     machine = platform.machine()
-
-    is_rpi = (system == "Linux" and ("arm" in machine.lower() or "aarch64" in machine.lower()))
+    is_rpi  = (system == "Linux" and ("arm" in machine.lower() or "aarch64" in machine.lower()))
 
     if is_rpi:
-        try:
-            from picamera2 import Picamera2
-            print("[camera] Raspberry Pi detected — using picamera2")
-            cam = Picamera2()
-            cam.configure(cam.create_video_configuration(main={"size": (640, 480)}))
-            cam.start()
-            return ("picamera2", cam)
-        except Exception as e:
-            print(f"[camera] picamera2 not available ({e}) — falling back to OpenCV")
+        result = os.system("rpicam-still --list-cameras > /dev/null 2>&1")
+        if result != 0:
+            raise IOError("No camera detected. Check your connection and try again.")
+        print("[camera] Raspberry Pi detected — using rpicam-still")
+        return ("rpicam", None)
 
-    # macOS or RPI fallback
+    # macOS / local machine fallback
     print("[camera] Using OpenCV webcam capture")
     cam = cv2.VideoCapture(0)
     if not cam.isOpened():
         raise RuntimeError(
-            "Could not open camera. Make sure a webcam is connected and "
-            "that you have granted camera permissions to your terminal / IDE."
+            "Could not open camera. Check that a webcam is connected and "
+            "that camera permissions are granted to your terminal / IDE."
         )
     cam.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
     cam.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
@@ -67,15 +57,16 @@ CAMERA_TYPE, CAMERA = init_camera()
 
 # FRAME GENERATOR
 def generate_frames():
-    """
-    Continuously captures frames from whichever camera backend is active
-    and yields them as an MJPEG stream.
-    """
+    tmp_path = "/tmp/stream_frame.jpg"
     while True:
-        if CAMERA_TYPE == "picamera2":
-            import numpy as np
-            frame = CAMERA.capture_array()
-            frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+        if CAMERA_TYPE == "rpicam":
+            ret = os.system(f"rpicam-still -o {tmp_path} --nopreview -t 500 > /dev/null 2>&1")
+            if ret != 0 or not os.path.exists(tmp_path):
+                print("[camera] rpicam-still failed to capture frame — retrying...")
+                continue
+            frame_bgr = cv2.imread(tmp_path)
+            if frame_bgr is None:
+                continue
         else:
             success, frame_bgr = CAMERA.read()
             if not success:
@@ -83,14 +74,12 @@ def generate_frames():
                 continue
 
         _, buffer = cv2.imencode(".jpg", frame_bgr, [cv2.IMWRITE_JPEG_QUALITY, 85])
-
         yield (
             b"--frame\r\n"
             b"Content-Type: image/jpeg\r\n\r\n" +
             buffer.tobytes() +
             b"\r\n"
         )
-
 
 # ROUTES
 @app.route("/stream")

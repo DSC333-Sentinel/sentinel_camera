@@ -1,0 +1,8 @@
+streamlit
+psycopg2-binary
+pandas
+python-dotenv
+flask
+opencv-python
+google-cloud-vision
+google-cloud-storage

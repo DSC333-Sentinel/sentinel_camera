@@ -39,11 +39,12 @@ def init_camera():
         proc = subprocess.Popen(
             [
                 "rpicam-vid",
-                "-t",          "0",         # run indefinitely
-                "--codec",     "mjpeg",      # output MJPEG not h264
+                "-t",          "0",
+                "--codec",     "mjpeg",
                 "--width",     "640",
                 "--height",    "480",
-                "--framerate", "15",         # bump to 30 if your Pi can handle it
+                "--framerate", "15",
+                "--roi",       "0,0,1,1",   # full sensor, no crop
                 "--nopreview",
                 "-o",          "-",          # pipe to stdout
             ],

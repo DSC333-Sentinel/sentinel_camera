@@ -3,18 +3,15 @@ Sentinel – Camera Stream
 ==============================
 Streams MJPEG video over HTTP so the Streamlit dashboard can display it.
 
-On MacBook:     uses OpenCV (cv2) to access the built-in webcam.
-On Raspberry Pi: attempts to use picamera2 first, falls back to OpenCV
-                 if picamera2 is not available.
+On A Personal Laptop: uses OpenCV (cv2) to access the built-in webcam.
+On Raspberry Pi: attempts to use rpicamera first, falls back to OpenCV
+                 if rpicamera is not available.
 
-Requirements:
-    pip install flask opencv-python
-
-    # RPI only (if using the Pi camera module):
-    pip install picamera2
+RPI only (if using the Pi camera module):
+sudo apt install -y rpicam-apps
 
 Run with:
-    python camera_stream.py
+python3 sentinel_camera.py
 
 Stream will be available at:
     http://localhost:8080/stream

@@ -21,109 +21,177 @@ Stream will be available at:
 """
 
 import cv2
+import time
 from flask import Flask, Response
-import platform
-import os
-import subprocess
-
+ 
 app = Flask(__name__)
-
-# CAMERA SETUP
+ 
+ 
+# ─────────────────────────────────────────────
+# CAMERA ABSTRACTION
+# ─────────────────────────────────────────────
+ 
+class PiCamera:
+    """Wraps picamera2 for use on Raspberry Pi."""
+ 
+    def __init__(self):
+        from picamera2 import Picamera2
+        self.cam = Picamera2()
+        config = self.cam.create_video_configuration(
+            main={"size": (640, 480), "format": "RGB888"},
+            controls={"FrameRate": 30}
+        )
+        self.cam.configure(config)
+        self.cam.start()
+        # Give the sensor a moment to warm up
+        time.sleep(1)
+ 
+    def read_frame(self):
+        """Returns a JPEG-encoded frame as bytes, or None on failure."""
+        try:
+            frame = self.cam.capture_array()
+            # picamera2 returns RGB — convert to BGR for OpenCV
+            frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+            success, buffer = cv2.imencode(".jpg", frame_bgr)
+            return buffer.tobytes() if success else None
+        except Exception as e:
+            print(f"[PiCamera] Frame error: {e}")
+            return None
+ 
+    def release(self):
+        self.cam.stop()
+ 
+ 
+class OpenCVCamera:
+    """
+    Wraps cv2.VideoCapture.
+    Works on Mac (built-in camera), Linux (USB cam), and as a
+    fallback on RPI if picamera2 is unavailable.
+    """
+ 
+    def __init__(self, index=0):
+        self.cap = cv2.VideoCapture(index)
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH,  640)
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+        self.cap.set(cv2.CAP_PROP_FPS, 30)
+ 
+        if not self.cap.isOpened():
+            raise RuntimeError(f"Could not open camera at index {index}. "
+                               "Try a different index (0, 1, 2...).")
+ 
+    def read_frame(self):
+        """Returns a JPEG-encoded frame as bytes, or None on failure."""
+        ret, frame = self.cap.read()
+        if not ret:
+            return None
+        success, buffer = cv2.imencode(".jpg", frame)
+        return buffer.tobytes() if success else None
+ 
+    def release(self):
+        self.cap.release()
+ 
+ 
+# ─────────────────────────────────────────────
+# CAMERA INIT — try picamera2 first, fall back to OpenCV
+# ─────────────────────────────────────────────
+ 
 def init_camera():
-    system  = platform.system()
-    machine = platform.machine()
-    is_rpi  = (system == "Linux" and ("arm" in machine.lower() or "aarch64" in machine.lower()))
-
-    if is_rpi:
-        import subprocess
-        proc = subprocess.Popen(
-            [
-                "rpicam-vid",
-                "-t",          "0",
-                "--codec",     "mjpeg",
-                "--width",     "640",
-                "--height",    "480",
-                "--framerate", "15",
-                "--roi",       "0,0,1,1",   # full sensor, no crop
-                "--nopreview",
-                "-o",          "-",          # pipe to stdout
-            ],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-        )
-        print("[camera] Raspberry Pi detected — using rpicam-vid (MJPEG pipe)")
-        return ("rpicam-vid", proc)
-
-    # macOS / local fallback
-    print("[camera] Using OpenCV webcam capture")
-    cam = cv2.VideoCapture(0)
-    if not cam.isOpened():
+    """
+    Attempts to initialise picamera2 (RPI).
+    Falls back to OpenCV if picamera2 is not installed or fails.
+    """
+    try:
+        cam = PiCamera()
+        print("[camera] Using picamera2 (Raspberry Pi)")
+        return cam
+    except ImportError:
+        print("[camera] picamera2 not found — falling back to OpenCV")
+    except Exception as e:
+        print(f"[camera] picamera2 failed ({e}) — falling back to OpenCV")
+ 
+    try:
+        cam = OpenCVCamera(index=0)
+        print("[camera] Using OpenCV camera (index 0)")
+        return cam
+    except RuntimeError as e:
+        print(f"[camera] OpenCV index 0 failed ({e}), trying index 1...")
+ 
+    # Last resort — try index 1 (some Macs or USB cameras land here)
+    try:
+        cam = OpenCVCamera(index=1)
+        print("[camera] Using OpenCV camera (index 1)")
+        return cam
+    except RuntimeError as e:
         raise RuntimeError(
-            "Could not open camera. Check that a webcam is connected and "
-            "that camera permissions are granted to your terminal / IDE."
-        )
-    cam.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-    cam.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-    return ("opencv", cam)
-
-
-CAMERA_TYPE, CAMERA = init_camera()
-
-# FRAME GENERATOR
+            "No camera could be opened. "
+            "Check that your camera is connected and not in use by another app."
+        ) from e
+ 
+ 
+camera = init_camera()
+ 
+ 
+# ─────────────────────────────────────────────
+# MJPEG STREAM GENERATOR
+# ─────────────────────────────────────────────
+ 
 def generate_frames():
-    if CAMERA_TYPE == "rpicam-vid":
-        # Read the raw MJPEG byte stream from rpicam-vid stdout.
-        # JPEG frames are delimited by SOI (0xFF 0xD8) and EOI (0xFF 0xD9) markers.
-        buf = b""
-        while True:
-            chunk = CAMERA.stdout.read(4096)
-            if not chunk:
+    """
+    Yields a continuous MJPEG byte stream for the /stream endpoint.
+    Retries on dropped frames with a short back-off.
+    """
+    consecutive_failures = 0
+    MAX_FAILURES = 10
+ 
+    while True:
+        frame_bytes = camera.read_frame()
+ 
+        if frame_bytes is None:
+            consecutive_failures += 1
+            print(f"[stream] Failed to read frame ({consecutive_failures}/{MAX_FAILURES})")
+            if consecutive_failures >= MAX_FAILURES:
+                print("[stream] Too many consecutive failures — stopping stream.")
                 break
-            buf += chunk
-
-            start = buf.find(b"\xff\xd8")  # JPEG SOI marker
-            end   = buf.find(b"\xff\xd9")  # JPEG EOI marker
-
-            if start != -1 and end != -1 and end > start:
-                jpg = buf[start:end + 2]
-                buf = buf[end + 2:]         # keep remainder for next frame
-
-                yield (
-                    b"--frame\r\n"
-                    b"Content-Type: image/jpeg\r\n\r\n" +
-                    jpg +
-                    b"\r\n"
-                )
-    else:
-        while True:
-            success, frame_bgr = CAMERA.read()
-            if not success:
-                print("[camera] Failed to read frame — retrying...")
-                continue
-            _, buffer = cv2.imencode(".jpg", frame_bgr, [cv2.IMWRITE_JPEG_QUALITY, 85])
-            yield (
-                b"--frame\r\n"
-                b"Content-Type: image/jpeg\r\n\r\n" +
-                buffer.tobytes() +
-                b"\r\n"
-            )
-
-# ROUTES
+            time.sleep(0.1)
+            continue
+ 
+        consecutive_failures = 0
+        yield (
+            b"--frame\r\n"
+            b"Content-Type: image/jpeg\r\n\r\n" +
+            frame_bytes +
+            b"\r\n"
+        )
+ 
+ 
+# ─────────────────────────────────────────────
+# FLASK ROUTES
+# ─────────────────────────────────────────────
+ 
 @app.route("/stream")
 def stream():
-    """MJPEG stream endpoint — point Streamlit or a browser at this URL."""
+    """MJPEG stream endpoint consumed by the Streamlit dashboard."""
     return Response(
         generate_frames(),
         mimetype="multipart/x-mixed-replace; boundary=frame"
     )
-
+ 
 @app.route("/health")
 def health():
-    """Quick sanity check — useful for confirming the server is up."""
-    return {"status": "ok", "camera": CAMERA_TYPE}
-
-# ENTRYPOINT
+    """Simple health check so the dashboard can verify the stream is up."""
+    return {"status": "ok", "camera": camera.__class__.__name__}
+ 
+ 
+# ─────────────────────────────────────────────
+# ENTRY POINT
+# ─────────────────────────────────────────────
+ 
 if __name__ == "__main__":
-    port = int(os.getenv("STREAM_PORT", 8080))
-    print(f"[camera] Stream running at http://localhost:{port}/stream")
-    app.run(host="0.0.0.0", port=port, threaded=True)
+    print("[SmartSentinel] Camera stream starting on http://0.0.0.0:8080")
+    print("[SmartSentinel] Stream URL: http://localhost:8080/stream")
+    try:
+        app.run(host="0.0.0.0", port=8080, threaded=True)
+    finally:
+        print("[SmartSentinel] Releasing camera...")
+        camera.release()
+ 

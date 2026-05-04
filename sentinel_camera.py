@@ -121,6 +121,25 @@ def health():
 
 # ENTRYPOINT
 if __name__ == "__main__":
+    import socket
     port = int(os.getenv("STREAM_PORT", 8080))
-    print(f"[camera] Stream running at http://localhost:{port}/stream")
+
+    # Resolve the machine's local IP so you know what URL to enter in Sentinel
+    try:
+        hostname = socket.gethostname()
+        local_ip = socket.gethostbyname(hostname)
+    except Exception:
+        local_ip = "localhost"
+
+    print("")
+    print("┌─────────────────────────────────────────────┐")
+    print("│           Sentinel Camera Stream            │")
+    print("├─────────────────────────────────────────────┤")
+    print(f"│  Local:    http://localhost:{port}/stream      │")
+    print(f"│  Network:  http://{local_ip}:{port}/stream")
+    print("│                                             │")
+    print("│  Copy the Network URL into the Sentinel     │")
+    print("│  dashboard under Cameras → Add New Camera   │")
+    print("└─────────────────────────────────────────────┘")
+    print("")
     app.run(host="0.0.0.0", port=port, threaded=True)

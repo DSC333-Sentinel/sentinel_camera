@@ -66,49 +66,68 @@ def init_camera():
 
 CAMERA_TYPE, CAMERA = init_camera()
 
-# FRAME GENERATOR
-def generate_frames():
+# ─────────────────────────────────────────────
+# SHARED FRAME BUFFER
+# Runs in a background thread. All clients read
+# from the same latest_frame instead of the camera directly.
+# ─────────────────────────────────────────────
+import threading
+
+latest_frame = None
+frame_lock   = threading.Lock()
+
+def capture_loop():
+    global latest_frame
     if CAMERA_TYPE == "rpicam-vid":
-        # Read the raw MJPEG byte stream from rpicam-vid stdout.
-        # JPEG frames are delimited by SOI (0xFF 0xD8) and EOI (0xFF 0xD9) markers.
         buf = b""
         while True:
             chunk = CAMERA.stdout.read(4096)
             if not chunk:
                 break
             buf += chunk
-
-            start = buf.find(b"\xff\xd8")  # JPEG SOI marker
-            end   = buf.find(b"\xff\xd9")  # JPEG EOI marker
-
+            start = buf.find(b"\xff\xd8")
+            end   = buf.find(b"\xff\xd9")
             if start != -1 and end != -1 and end > start:
                 jpg = buf[start:end + 2]
-                buf = buf[end + 2:]         # keep remainder for next frame
-
-                yield (
-                    b"--frame\r\n"
-                    b"Content-Type: image/jpeg\r\n\r\n" +
-                    jpg +
-                    b"\r\n"
-                )
+                buf = buf[end + 2:]
+                with frame_lock:
+                    latest_frame = jpg
     else:
         while True:
             success, frame_bgr = CAMERA.read()
             if not success:
-                print("[camera] Failed to read frame — retrying...")
                 continue
             _, buffer = cv2.imencode(".jpg", frame_bgr, [cv2.IMWRITE_JPEG_QUALITY, 85])
-            yield (
-                b"--frame\r\n"
-                b"Content-Type: image/jpeg\r\n\r\n" +
-                buffer.tobytes() +
-                b"\r\n"
-            )
+            with frame_lock:
+                latest_frame = buffer.tobytes()
+
+# Start capture loop in background thread on startup
+t = threading.Thread(target=capture_loop, daemon=True)
+t.start()
+
+
+# FRAME GENERATOR
+def generate_frames():
+    """Each client gets its own generator that reads from the shared buffer."""
+    import time
+    while True:
+        with frame_lock:
+            frame = latest_frame
+        if frame is None:
+            time.sleep(0.05)
+            continue
+        yield (
+            b"--frame\r\n"
+            b"Content-Type: image/jpeg\r\n\r\n" +
+            frame +
+            b"\r\n"
+        )
+        time.sleep(0.05)  # ~20fps cap, adjust as needed
+
 
 # ROUTES
 @app.route("/stream")
 def stream():
-    """MJPEG stream endpoint — point Streamlit or a browser at this URL."""
     return Response(
         generate_frames(),
         mimetype="multipart/x-mixed-replace; boundary=frame"
@@ -116,15 +135,14 @@ def stream():
 
 @app.route("/health")
 def health():
-    """Quick sanity check — useful for confirming the server is up."""
     return {"status": "ok", "camera": CAMERA_TYPE}
+
 
 # ENTRYPOINT
 if __name__ == "__main__":
     import socket
     port = int(os.getenv("STREAM_PORT", 8080))
 
-    # Resolve the machine's local IP so you know what URL to enter in Sentinel
     try:
         hostname = socket.gethostname()
         local_ip = socket.gethostbyname(hostname)

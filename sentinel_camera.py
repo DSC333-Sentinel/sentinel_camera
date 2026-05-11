@@ -4,8 +4,7 @@ Sentinel – Camera Stream
 Streams MJPEG video over HTTP so the Streamlit dashboard can display it.
 
 On A Personal Laptop: uses OpenCV (cv2) to access the built-in webcam.
-On Raspberry Pi: attempts to use rpicamera first, falls back to OpenCV
-                 if rpicamera is not available.
+On Raspberry Pi: attempts to use rpicamera first, falls back to OpenCV if rpicamera is not available.
 
 RPI only (if using the Pi camera module):
 sudo apt install -y rpicam-apps
@@ -156,7 +155,7 @@ if __name__ == "__main__":
     print(f"│  Local:    http://localhost:{port}/stream      │")
     print(f"│  Network:  http://{local_ip}:{port}/stream")
     print("│                                             │")
-    print("│  Copy the Network URL into the Sentinel     │")
+    print("│  Copy the IP into the Sentinel              │")
     print("│  dashboard under Cameras → Add New Camera   │")
     print("└─────────────────────────────────────────────┘")
     print("")

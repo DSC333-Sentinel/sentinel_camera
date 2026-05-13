@@ -29,7 +29,7 @@ A background thread continuously reads frames into a shared buffer. Multiple cli
 ### 1. Clone the repository
 
 ```bash
-git clone <your-camera-repo-url>
+git clone https://github.com/DSC333-Sentinel/sentinel_camera.git
 cd sentinel-camera
 ```
 
